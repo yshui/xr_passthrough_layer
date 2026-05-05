@@ -374,7 +374,7 @@ impl SessionData {
             if image_index.is_none() {
                 warn!("end_frame called without begin_frame");
             } else {
-                warn!("Pose or orientation invalid {view_state_flags:?}, skip passthrough layer");
+                debug!("Pose or orientation invalid {view_state_flags:?}, skip passthrough layer");
             }
             let layers = info
                 .layers
