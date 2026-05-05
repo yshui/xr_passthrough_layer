@@ -23,14 +23,18 @@ pub fn find_index_camera() -> Result<std::path::PathBuf> {
     let mut it = udev::Enumerator::new()?;
     it.match_subsystem("video4linux")?;
     it.match_property("ID_VENDOR_ID", "28de")?;
-    it.match_property("ID_MODEL_ID", "2400")?;
 
     let dev = it
         .scan_devices()?
-        .next()
+        .find(|d| {
+            d.properties()
+                .find(|p| p.name() == "ID_MODEL_ID")
+                .is_some_and(|p| p.value() == "2400")
+        })
         .with_context(|| anyhow!("Index camera not found"))?;
     let devnode = dev
         .devnode()
         .with_context(|| anyhow!("Index camera cannot be accessed"))?;
+    log::info!("Index camera is {}, {}", devnode.display(), dev.syspath().display());
     Ok(devnode.to_owned())
 }
