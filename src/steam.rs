@@ -89,92 +89,138 @@ pub struct LighthouseConfig {
 ioctl_readwrite_buf!(hidiocgfeature, 'H', 7, u8);
 
 pub fn load_config_file_from_headset() -> Option<StereoCamera> {
-    log::debug!("Loading config file from headset");
-    let mut it = udev::Enumerator::new().expect("Failed to create udev enumerator");
-    it.match_property("ID_VENDOR_ID", "28de")
-        .expect("Failed to add property filter");
-    it.match_property("ID_MODEL_ID", "2300")
-        .expect("Failed to add property filter");
-    it.match_subsystem("hidraw")
-        .expect("Failed to add subsystem filter");
-    //it.match_attribute("bInterfaceNumber", "00")?;
+    log::info!("Loading config file from headset");
+    let mut it = match udev::Enumerator::new() {
+        Ok(it) => it,
+        Err(e) => {
+            log::error!("Couldn't create udev enumerator: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = it.match_property("ID_VENDOR_ID", "28de") {
+        log::error!("Couldn't add match property: {e}");
+        return None;
+    }
+    if let Err(e) = it.match_subsystem("hidraw") {
+        log::error!("Couldn't add match subsystem: {e}");
+        return None;
+    }
+    let mut devs = match it.scan_devices() {
+        Ok(devs) => devs,
+        Err(e) => {
+            log::error!("Couldn't start device scan: {e}");
+            return None;
+        }
+    };
     let mut buf: [u8; 0x41] = [0; 0x41];
-    it.scan_devices()
-        .expect("Failed to scan devices")
-        .find_map(|device| {
-            log::debug!("Found device {:?}", device.devnode());
-            let fd = nix::fcntl::open(
-                device.devnode().expect("failed to get devnode"),
-                OFlag::O_RDWR,
-                Mode::S_IRWXU,
-            )
-            .expect("Failed to open device");
+    let (lhconfig, camera_config) = devs.find_map(|device| {
+        let mut model = None;
+        let mut interface_num = None;
+        for prop in device.properties() {
+            if prop.name() == "ID_MODEL_ID" {
+                model = Some(prop)
+            } else if prop.name() == "ID_USB_INTERFACE_NUM" {
+                interface_num = Some(prop)
+            }
+        }
+        let devnode = if model.is_some_and(|m| m.value() == "2300")
+            && interface_num.is_some_and(|i| i.value() == "00")
+            && let Some(devnode) = device.devnode()
+        {
+            devnode
+        } else {
+            return None;
+        };
 
-            let mut res: Result<i32, Errno> = Errno::result(-1);
-            let mut retries = 0;
+        log::info!("Found device {:?} {}", devnode, device.syspath().display());
+        let fd = match nix::fcntl::open(devnode, OFlag::O_RDWR, Mode::S_IRWXU) {
+            Ok(fd) => fd,
+            Err(e) => {
+                log::error!("Couldn't open {}: {e}", devnode.display());
+                return None;
+            }
+        };
+
+        let mut res = Errno::result(-1);
+        let mut retries = 0;
+        while res.is_err() && retries < 50 {
+            retries += 1;
+            buf[0] = 0x10;
+            unsafe {
+                res = hidiocgfeature(fd.as_raw_fd(), &mut buf);
+            }
+        }
+        if let Err(e) = res {
+            log::error!(
+                "[{}] Failed to request start of config: {e:#}",
+                devnode.display()
+            );
+            return None;
+        }
+
+        let mut config_data = vec![];
+
+        while res.unwrap() != 0 && buf[1] != 0 {
+            retries = 0;
+            res = Errno::result(-1);
             while res.is_err() && retries < 50 {
                 retries += 1;
-                buf[0] = 0x10;
+                buf[0] = 0x11;
                 unsafe {
                     res = hidiocgfeature(fd.as_raw_fd(), &mut buf);
                 }
             }
             if let Err(e) = res {
-                log::error!("Failed to request start of config: {e:#}");
+                log::error!(
+                    "[{}] Failed to retrieve usb config data: {e:#}",
+                    devnode.display()
+                );
                 return None;
             }
+            config_data.extend_from_slice(&buf[2..buf.len() - 1]);
+        }
 
-            let mut config_data: Vec<u8> = vec![];
+        let mut config = String::new();
+        let mut z = ZlibDecoder::new(&config_data[..]);
+        let res = z.read_to_string(&mut config);
+        if let Err(e) = res {
+            log::error!(
+                "[{}] Failed to decompress usb data: {e:#}",
+                devnode.display()
+            );
+            return None;
+        }
 
-            while res.unwrap() != 0 && buf[1] != 0 {
-                retries = 0;
-                res = Errno::result(-1);
-                while res.is_err() && retries < 50 {
-                    retries += 1;
-                    buf[0] = 0x11;
-                    unsafe {
-                        res = hidiocgfeature(fd.as_raw_fd(), &mut buf);
-                    }
-                }
-                if let Err(e) = res {
-                    log::error!("Failed to retrieve usb config data: {e:#}");
-                    return None;
-                }
-                config_data.extend_from_slice(&buf[2..buf.len() - 1]);
-            }
-
-            let mut config = String::new();
-            let mut z = ZlibDecoder::new(&config_data[..]);
-            let res = z.read_to_string(&mut config);
-            if let Err(e) = res {
-                log::error!("Failed to decompress usb data: {e:#}");
+        log::debug!("{:?}", config);
+        log::debug!("Trying to parse config");
+        let lhconfig: LighthouseConfig = match serde_json::from_str(&config) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                log::error!("Failed to parse config json: {e}");
                 return None;
             }
+        };
 
-            log::debug!("{:?}", config);
-            log::debug!("Trying to parse config");
-            let lhconfig: LighthouseConfig = serde_json::from_str(&config).ok()?;
-            log::debug!("Serial number: {:?}", lhconfig.device_serial_number);
-            let xdg = xdg::BaseDirectories::new();
-            let cache = xdg
-                .create_cache_directory("xr_passthrough_layer")
-                .expect("Failed to create cache dir");
-            let config_file = cache.join(lhconfig.device_serial_number.clone() + ".json");
-            let mut file = File::create(config_file).expect("Failed to open cache file");
-            file.write_all(config.as_bytes())
-                .expect("Failed to write headset config");
-
-            match StereoCamera::new(&lhconfig) {
-                Err(e) => {
-                    log::error!(
-                        "Failed to get StereoCamera for device {e:#}: {}",
-                        lhconfig.device_serial_number
-                    );
-                    None
-                }
-                Ok(cfg) => Some(cfg),
+        match StereoCamera::new(&lhconfig) {
+            Ok(cfg) => Some((lhconfig, cfg)),
+            Err(e) => {
+                log::error!("Couldn't load camera correction from headset config: {e}");
+                None
             }
-        })
+        }
+    })?;
+
+    log::debug!("Serial number: {:?}", lhconfig.device_serial_number);
+    let xdg = xdg::BaseDirectories::new();
+    let cache = xdg
+        .create_cache_directory("xr_passthrough_layer")
+        .expect("Failed to create cache dir");
+    let config_file = cache.join(lhconfig.device_serial_number.clone() + ".json");
+    let file = File::create(config_file).expect("Failed to open cache file");
+    if let Err(e) = serde_json::to_writer(file, &lhconfig) {
+        log::warn!("Failed to write headset config to disk: {e}")
+    }
+    Some(camera_config)
 }
 
 fn find_steam_config_steam() -> Option<StereoCamera> {
@@ -213,7 +259,7 @@ fn find_steam_config_cache() -> Option<StereoCamera> {
     let cache = xdg
         .create_cache_directory("xr_passthrough_layer")
         .expect("Failed to create cache dir");
-    log::debug!(
+    log::info!(
         "Didn't find config file in steam config dir, trying {:?}",
         cache
     );
@@ -224,6 +270,7 @@ fn find_steam_config_cache() -> Option<StereoCamera> {
         let json = std::fs::read_to_string(config.path()).ok()?;
         log::debug!("Trying to parse config");
         let lhconfig: LighthouseConfig = serde_json::from_str(&json).ok()?;
+        log::info!("Found headset config in cache: {}", config.path().display());
         match StereoCamera::new(&lhconfig) {
             Err(e) => {
                 log::error!(
@@ -241,9 +288,7 @@ fn find_steam_config_cache() -> Option<StereoCamera> {
 pub fn find_steam_config() -> Option<StereoCamera> {
     find_steam_config_steam()
         .or_else(find_steam_config_cache)
-        .or_else(|| {
-            Some(load_config_file_from_headset().expect("Failed to load config file from headset"))
-        })
+        .or_else(load_config_file_from_headset)
 }
 // seems to not be used????
 pub fn load_steam_config(hmd_serial: &str) -> Result<StereoCamera> {
