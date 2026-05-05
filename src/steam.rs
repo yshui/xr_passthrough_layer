@@ -1,5 +1,6 @@
 use std::io::prelude::*;
 use std::os::fd::AsRawFd;
+use std::time::Duration;
 use std::{ffi::OsStr, fs::File};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -88,6 +89,28 @@ pub struct LighthouseConfig {
 
 ioctl_readwrite_buf!(hidiocgfeature, 'H', 7, u8);
 
+fn hidiocgfeature_with_retry(
+    fd: &impl AsRawFd,
+    report_id: u8,
+    buf: &mut [u8],
+) -> Result<i32, Errno> {
+    const MAX_RETRIES: u32 = 50;
+    let mut retries = 0;
+    loop {
+        retries += 1;
+        buf[0] = report_id;
+        match unsafe { hidiocgfeature(fd.as_raw_fd(), buf) } {
+            Ok(n) => break Ok(n),
+            Err(e) => {
+                if retries == MAX_RETRIES {
+                    break Err(e);
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 pub fn load_config_file_from_headset(dev: &udev::Device) -> Option<StereoCamera> {
     let devnode = dev.devnode().unwrap();
     log::info!("Loading config file from headset: {}", devnode.display());
@@ -100,43 +123,37 @@ pub fn load_config_file_from_headset(dev: &udev::Device) -> Option<StereoCamera>
         }
     };
 
-    let mut res = Errno::result(-1);
-    let mut retries = 0;
-    while res.is_err() && retries < 50 {
-        retries += 1;
-        buf[0] = 0x10;
-        unsafe {
-            res = hidiocgfeature(fd.as_raw_fd(), &mut buf);
-        }
-    }
-    if let Err(e) = res {
-        log::error!(
-            "[{}] Failed to request start of config: {e:#}",
-            devnode.display()
-        );
-        return None;
-    }
-
-    let mut config_data = vec![];
-
-    while res.unwrap() != 0 && buf[1] != 0 {
-        retries = 0;
-        res = Errno::result(-1);
-        while res.is_err() && retries < 50 {
-            retries += 1;
-            buf[0] = 0x11;
-            unsafe {
-                res = hidiocgfeature(fd.as_raw_fd(), &mut buf);
-            }
-        }
-        if let Err(e) = res {
+    match hidiocgfeature_with_retry(&fd, 0x10, &mut buf) {
+        Err(e) => {
             log::error!(
-                "[{}] Failed to retrieve usb config data: {e:#}",
+                "[{}] Failed to request start of config: {e:#}",
                 devnode.display()
             );
             return None;
         }
-        config_data.extend_from_slice(&buf[2..buf.len() - 1]);
+        Ok(0) => {
+            log::error!("[{}] Request start of config got 0", devnode.display());
+            return None;
+        }
+        Ok(n) => n,
+    };
+
+    let mut config_data = vec![];
+    loop {
+        let n = match hidiocgfeature_with_retry(&fd, 0x11, &mut buf) {
+            Err(e) => {
+                log::error!(
+                    "[{}] Failed to retrieve usb config data: {e:#}",
+                    devnode.display()
+                );
+                return None;
+            }
+            Ok(n) => n,
+        };
+        if n == 0 || buf[1] == 0 {
+            break;
+        }
+        config_data.extend_from_slice(&buf[2..][..buf[1] as usize]);
     }
 
     let mut config = String::new();
