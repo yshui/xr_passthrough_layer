@@ -17,6 +17,7 @@ anyhow = { version = "1.0", features = ["backtrace"] }
 openxr = "0.21"
 nalgebra = "0.34"
 serde = { version = "1.0", features = ["derive"] }
+ioctl = { version = "0.31.2", features = ["ioctl"] }
 log = "0.4"
 env_logger = "0.11"
 itertools = "0.14"
@@ -70,6 +71,8 @@ quark = { path = "thirdparty/quark" }
 rand = "0.10.0-rc.5"
 arc-swap = "1.7.1"
 phf.workspace = true
+nix = { version = "0.31.2", features = ["ioctl", "fs"] }
+flate2 = { version = "1.1.9", features = ["zlib"] }
 
 [build-dependencies]
 anyhow.workspace = true
