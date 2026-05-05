@@ -3,7 +3,7 @@
     rustup.url = "github:yshui/rustup.nix";
     rust-manifest = {
       flake = false;
-      url = "https://static.rust-lang.org/dist/2026-02-26/channel-rust-nightly.toml";
+      url = "https://static.rust-lang.org/dist/2026-05-05/channel-rust-nightly.toml";
     };
   };
   description = "xr_passthrough_layer";
@@ -61,9 +61,9 @@
               SDL2
               opencv
               openvr
-              xorg.libX11
-              xorg.libXcursor
-              xorg.libXi
+              libx11
+              libxcursor
+              libxi
               libxkbcommon
               openxr-loader
               gcc.cc.lib
