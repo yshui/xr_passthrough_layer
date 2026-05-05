@@ -58,14 +58,13 @@ use vulkano::{
 
 /// Lens distortion correction parameters for a side-by-side stereo image
 #[derive(Debug)]
-pub struct StereoUndistortParams {
+struct StereoUndistortParams {
     /// field-of-view parameter, 0 = left eye, 1 = right eye
     fov: [Vec2; 2],
     scale: [Vec2; 2],
     focal: [Vec2; 2],
     center: [Vec2; 2],
     coeff: [Vec4; 2],
-    size: Vec2,
 }
 
 impl StereoUndistortParams {
@@ -170,7 +169,6 @@ impl StereoUndistortParams {
             focal,
             center,
             coeff,
-            size,
         })
     }
 }
@@ -351,7 +349,7 @@ impl Pipeline {
             PipelineShaderStageCreateInfo::new(&vs_main),
             PipelineShaderStageCreateInfo::new(&fs_main),
         ];
-        let layout = PipelineLayout::from_stages(&device, &stages)?;
+        let layout = PipelineLayout::from_stages(device, &stages)?;
         let sampler = Sampler::new(
             device,
             &SamplerCreateInfo {
@@ -399,7 +397,7 @@ impl Pipeline {
             })
             .transpose()?;
         let pipeline = GraphicsPipeline::new(
-            &device,
+            device,
             Some(&pipeline_cache),
             &GraphicsPipelineCreateInfo {
                 vertex_input_state: Some(&Vertex::per_vertex().definition(&vs_main)?),

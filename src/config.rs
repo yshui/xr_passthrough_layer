@@ -148,7 +148,7 @@ pub fn load_pipeline_cache(
         })
     {
         PipelineCache::new(
-            &device,
+            device,
             &PipelineCacheCreateInfo {
                 // SAFETY: we validated the signature
                 initial_data: Some(unsafe { PipelineCacheData::new(&data) }),
@@ -156,7 +156,7 @@ pub fn load_pipeline_cache(
             },
         )
     } else {
-        PipelineCache::new(&device, &PipelineCacheCreateInfo::default())
+        PipelineCache::new(device, &PipelineCacheCreateInfo::default())
     }
     .map_err(Into::into)
 }
