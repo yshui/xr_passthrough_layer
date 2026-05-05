@@ -12,7 +12,10 @@ use std::{
 };
 use vulkano::{
     Handle as _, VulkanObject,
-    device::{Device, DeviceExtensions, DeviceFeatures, Queue, QueueFlags},
+    device::{
+        DefaultQueueMutex, Device, DeviceExtensions, DeviceFeatures, DeviceQueueInfo, Queue,
+        QueueFlags,
+    },
     image::Image,
     instance::{Instance, InstanceExtensions as VkInstanceExtensions},
 };
@@ -25,7 +28,7 @@ use vulkano::{
 static VULKAN_LIBRARY: OnceLock<Arc<vulkano::VulkanLibrary>> = OnceLock::new();
 
 fn get_vulkan_library() -> &'static Arc<vulkano::VulkanLibrary> {
-    VULKAN_LIBRARY.get_or_init(|| vulkano::VulkanLibrary::new().unwrap())
+    VULKAN_LIBRARY.get_or_init(|| unsafe { vulkano::VulkanLibrary::new() }.unwrap())
 }
 
 struct VulkanKeepAlive {
@@ -168,7 +171,7 @@ impl OpenXr {
             physical_devices: &[&physical_device],
             ..Default::default()
         };
-        let (device, mut queues) = unsafe {
+        let device = unsafe {
             vulkano::device::Device::from_handle(
                 &physical_device,
                 ash::vk::Device::from_raw(
@@ -184,7 +187,26 @@ impl OpenXr {
                 &vulkano_create_info,
             )
         };
-        Ok((device, queues.next().unwrap()))
+        let queue = unsafe {
+            let mut queue = ash::vk::Queue::null();
+            (device.fns().v1_0.get_device_queue)(
+                device.handle(),
+                queue_family as u32,
+                0,
+                &mut queue,
+            );
+            vulkano::device::Queue::from_handle(
+                &device,
+                queue,
+                &DeviceQueueInfo {
+                    queue_family_index: queue_family as u32,
+                    queue_index: 0,
+                    ..Default::default()
+                },
+                Arc::new(DefaultQueueMutex::new()),
+            )
+        };
+        Ok((device, queue))
     }
 
     fn create_vk_instance(
@@ -504,7 +526,7 @@ impl OpenXr {
             frame_stream,
         ))
     }
-    pub fn render_info(&mut self) -> RenderInfo {
+    pub fn render_info(&mut self) -> RenderInfo<'_> {
         RenderInfo {
             session: &self.session,
             swapchain: &mut self.swapchain,

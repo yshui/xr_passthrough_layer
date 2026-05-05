@@ -1,5 +1,4 @@
 use glam::{Mat4, Quat, Vec3, Vec4};
-use smallvec::smallvec;
 use std::{collections::HashSet, sync::Arc, thread::JoinHandle};
 use winit::{
     event::WindowEvent,
@@ -20,8 +19,8 @@ use vulkano::{
         allocator::{CommandBufferAllocator, StandardCommandBufferAllocator},
     },
     descriptor_set::{
-        DescriptorSet, WriteDescriptorSet,
-        allocator::{DescriptorSetAllocator, StandardDescriptorSetAllocator},
+        DescriptorBufferInfo, DescriptorSet, WriteDescriptorSet,
+        allocator::StandardDescriptorSetAllocator,
     },
     device::{Device, Queue},
     format::ClearValue,
@@ -43,10 +42,10 @@ use vulkano::{
             input_assembly::{InputAssemblyState, PrimitiveTopology},
             multisample::MultisampleState,
             rasterization::RasterizationState,
+            subpass::PipelineSubpassType,
             vertex_input::{Vertex as _, VertexDefinition},
             viewport::{Viewport, ViewportState},
         },
-        layout::PipelineDescriptorSetLayoutCreateInfo,
     },
     render_pass::{
         AttachmentDescription, AttachmentLoadOp, AttachmentReference, AttachmentStoreOp,
@@ -177,7 +176,7 @@ struct App {
     state: SessionState,
     proxy: EventLoopProxy<AppMessage>,
     allocator: Arc<dyn MemoryAllocator>,
-    descriptor_set_allocator: Arc<dyn DescriptorSetAllocator>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
     cmdbuf_allocator: Arc<dyn CommandBufferAllocator>,
     vertices: Subbuffer<[Vertex]>,
     indices: Subbuffer<[u32]>,
@@ -515,15 +514,12 @@ impl App {
         swapchain: &vulkano::swapchain::Swapchain,
     ) -> Result<()> {
         let vs_main = self.vs.entry_point("main").unwrap();
-        let stages = smallvec![
-            PipelineShaderStageCreateInfo::new(vs_main.clone()),
-            PipelineShaderStageCreateInfo::new(self.fs.entry_point("main").unwrap()),
+        let fs_main = self.fs.entry_point("main").unwrap();
+        let stages = [
+            PipelineShaderStageCreateInfo::new(&vs_main),
+            PipelineShaderStageCreateInfo::new(&fs_main),
         ];
-        let layout = PipelineLayout::new(
-            self.device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(self.device.clone())?,
-        )?;
+        let layout = PipelineLayout::from_stages(&self.device, &stages)?;
         let extent = swapchain.image_extent();
         let depth_image = Image::new(
             &self.allocator,
@@ -563,78 +559,63 @@ impl App {
                 self.uniform_buffer_gpu_use_end.push(None);
             }
         }
-        let render_pass = RenderPass::new(
-            self.device.clone(),
-            RenderPassCreateInfo {
-                attachments: [
-                    AttachmentDescription {
-                        format: swapchain.image_format(),
-                        store_op: AttachmentStoreOp::Store,
-                        load_op: AttachmentLoadOp::Clear,
-                        initial_layout: ImageLayout::Undefined,
-                        final_layout: ImageLayout::ColorAttachmentOptimal,
-                        ..Default::default()
-                    },
-                    AttachmentDescription {
-                        format: vulkano::format::Format::D32_SFLOAT,
-                        store_op: AttachmentStoreOp::Store,
-                        load_op: AttachmentLoadOp::Clear,
-                        initial_layout: ImageLayout::Undefined,
-                        final_layout: ImageLayout::DepthStencilAttachmentOptimal,
-                        ..Default::default()
-                    },
-                ]
-                .into(),
-                subpasses: [SubpassDescription {
-                    color_attachments: [Some(AttachmentReference {
-                        attachment: 0,
-                        layout: ImageLayout::ColorAttachmentOptimal,
-                        ..Default::default()
-                    })]
-                    .into(),
-                    depth_stencil_attachment: Some(AttachmentReference {
-                        attachment: 1,
-                        layout: ImageLayout::DepthStencilAttachmentOptimal,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }]
-                .into(),
-                ..Default::default()
+        let render_pass = vulkano::single_pass_renderpass!(
+            &self.device,
+            attachments: {
+                color: {
+                    format: swapchain.image_format(),
+                    samples: 1,
+                    load_op: Clear,
+                    store_op: Store,
+                    initial_layout: ImageLayout::Undefined,
+                    final_layout: ImageLayout::ColorAttachmentOptimal,
+                },
+                depth_stencil: {
+                    format: vulkano::format::Format::D32_SFLOAT,
+                    samples: 1,
+                    load_op: Clear,
+                    store_op: Store,
+                    initial_layout: ImageLayout::Undefined,
+                    final_layout: ImageLayout::DepthStencilAttachmentOptimal,
+                },
             },
+            pass: {
+                color: [color],
+                depth_stencil: {depth_stencil},
+            }
         )?;
         let pipeline = GraphicsPipeline::new(
-            self.device.clone(),
+            &self.device,
             None,
-            GraphicsPipelineCreateInfo {
-                vertex_input_state: Some(Vertex::per_vertex().definition(&vs_main)?),
-                stages: stages.clone(),
-                input_assembly_state: Some(InputAssemblyState {
+            &GraphicsPipelineCreateInfo {
+                vertex_input_state: Some(&Vertex::per_vertex().definition(&vs_main)?),
+                stages: &stages,
+                input_assembly_state: Some(&InputAssemblyState {
                     topology: PrimitiveTopology::TriangleList,
                     ..Default::default()
                 }),
-                viewport_state: Some(ViewportState {
-                    viewports: smallvec![Viewport {
+                viewport_state: Some(&ViewportState {
+                    viewports: &[Viewport {
                         offset: [0., 0.],
                         extent: [extent[0] as f32, extent[1] as f32],
                         ..Default::default()
                     }],
                     ..Default::default()
                 }),
-                depth_stencil_state: Some(DepthStencilState {
+                depth_stencil_state: Some(&DepthStencilState {
                     depth: Some(DepthState::simple()),
                     ..Default::default()
                 }),
-                multisample_state: Some(MultisampleState {
+                multisample_state: Some(&Default::default()),
+                color_blend_state: Some(&ColorBlendState {
+                    attachments: &[Default::default()],
                     ..Default::default()
                 }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    1,
-                    Default::default(),
+                rasterization_state: Some(&RasterizationState::default()),
+                subpass: Some(PipelineSubpassType::BeginRenderPass(
+                    &Subpass::new(&render_pass, 0).unwrap(),
                 )),
-                rasterization_state: Some(RasterizationState::default()),
-                subpass: Some(Subpass::from(render_pass.clone(), 0).unwrap().into()),
-                ..GraphicsPipelineCreateInfo::new(layout.clone())
+                ..GraphicsPipelineCreateInfo::new(&layout)
             },
         )?;
         log::info!("Creating cmdbufs. extent: {extent:?}");
@@ -643,17 +624,23 @@ impl App {
             .zip(self.uniform_buffers.iter().take(images.len()))
             .map(|(i, mvp)| {
                 let descriptor_set = DescriptorSet::new(
-                    self.descriptor_set_allocator.clone(),
-                    pipeline.layout().set_layouts().first().unwrap().clone(),
-                    [WriteDescriptorSet::buffer(0, mvp.clone())],
-                    [],
+                    &self.descriptor_set_allocator,
+                    pipeline.layout().set_layouts().first().unwrap(),
+                    &[WriteDescriptorSet::buffer(
+                        0,
+                        &DescriptorBufferInfo {
+                            buffer: Some(mvp.buffer()),
+                            ..Default::default()
+                        },
+                    )],
+                    &[],
                 )?;
                 let framebuffer = Framebuffer::new(
-                    render_pass.clone(),
-                    FramebufferCreateInfo {
-                        attachments: vec![
-                            ImageView::new(i, &ImageViewCreateInfo::from_image(i))?,
-                            depth_image.clone(),
+                    &render_pass,
+                    &FramebufferCreateInfo {
+                        attachments: &[
+                            &ImageView::new(i, &ImageViewCreateInfo::from_image(i))?,
+                            &depth_image,
                         ],
                         ..Default::default()
                     },
@@ -710,9 +697,9 @@ impl App {
         } = xr.render_info();
         let representative_image = &swapchain_images[0];
         let render_pass = RenderPass::new(
-            device.clone(),
-            RenderPassCreateInfo {
-                attachments: [
+            &device,
+            &RenderPassCreateInfo {
+                attachments: &[
                     AttachmentDescription {
                         format: representative_image.format(),
                         store_op: AttachmentStoreOp::Store,
@@ -727,25 +714,22 @@ impl App {
                         final_layout: ImageLayout::DepthStencilAttachmentOptimal,
                         ..Default::default()
                     },
-                ]
-                .into(),
-                subpasses: [SubpassDescription {
-                    color_attachments: [Some(AttachmentReference {
+                ],
+                subpasses: &[SubpassDescription {
+                    color_attachments: &[Some(AttachmentReference {
                         attachment: 0,
                         layout: ImageLayout::ColorAttachmentOptimal,
                         ..Default::default()
-                    })]
-                    .into(),
+                    })],
                     view_mask: 0b11,
-                    depth_stencil_attachment: Some(AttachmentReference {
+                    depth_stencil_attachment: Some(&Some(AttachmentReference {
                         attachment: 1,
                         layout: ImageLayout::DepthStencilAttachmentOptimal,
                         ..Default::default()
-                    }),
+                    })),
                     ..Default::default()
-                }]
-                .into(),
-                correlated_view_masks: vec![0b11],
+                }],
+                correlated_view_masks: &[0b11],
                 ..Default::default()
             },
         )?;
@@ -754,8 +738,8 @@ impl App {
             &device,
             &Default::default(),
         ));
-        let vs = vs::load(device.clone())?;
-        let fs = fs::load(device.clone())?;
+        let vs = vs::load(&device)?;
+        let fs = fs::load(&device)?;
         let mvp = Buffer::new_sized::<vs::MVP>(
             &allocator,
             &BufferCreateInfo {
@@ -770,49 +754,48 @@ impl App {
             },
         )?;
         let vs_main = vs.entry_point("main").unwrap();
-        let stages = smallvec![
-            PipelineShaderStageCreateInfo::new(vs_main.clone()),
-            PipelineShaderStageCreateInfo::new(fs.entry_point("main").unwrap()),
+        let fs_main = fs.entry_point("main").unwrap();
+        let stages = [
+            PipelineShaderStageCreateInfo::new(&vs_main),
+            PipelineShaderStageCreateInfo::new(&fs_main),
         ];
-        let layout = PipelineLayout::new(
-            device.clone(),
-            PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages)
-                .into_pipeline_layout_create_info(device.clone())?,
-        )?;
+        let layout = PipelineLayout::from_stages(&device, &stages)?;
         let extent = representative_image.extent();
         let pipeline = GraphicsPipeline::new(
-            device.clone(),
+            &device,
             None,
-            GraphicsPipelineCreateInfo {
-                vertex_input_state: Some(Vertex::per_vertex().definition(&vs_main)?),
-                stages: stages.clone(),
-                input_assembly_state: Some(InputAssemblyState {
+            &GraphicsPipelineCreateInfo {
+                vertex_input_state: Some(&Vertex::per_vertex().definition(&vs_main)?),
+                stages: &stages,
+                input_assembly_state: Some(&InputAssemblyState {
                     topology: PrimitiveTopology::TriangleList,
                     ..Default::default()
                 }),
-                viewport_state: Some(ViewportState {
-                    viewports: smallvec![Viewport {
+                viewport_state: Some(&ViewportState {
+                    viewports: &[Viewport {
                         offset: [0., 0.],
                         extent: [extent[0] as f32, extent[1] as f32],
                         ..Default::default()
                     }],
                     ..Default::default()
                 }),
-                depth_stencil_state: Some(DepthStencilState {
+                depth_stencil_state: Some(&DepthStencilState {
                     depth: Some(DepthState::simple()),
                     ..Default::default()
                 }),
-                multisample_state: Some(MultisampleState {
+                multisample_state: Some(&MultisampleState {
                     rasterization_samples: representative_image.samples(),
                     ..Default::default()
                 }),
-                color_blend_state: Some(ColorBlendState::with_attachment_states(
-                    1,
-                    Default::default(),
+                color_blend_state: Some(&ColorBlendState {
+                    attachments: &[Default::default()],
+                    ..Default::default()
+                }),
+                rasterization_state: Some(&RasterizationState::default()),
+                subpass: Some(PipelineSubpassType::BeginRenderPass(
+                    &Subpass::new(&render_pass, 0).unwrap(),
                 )),
-                rasterization_state: Some(RasterizationState::default()),
-                subpass: Some(Subpass::from(render_pass.clone(), 0).unwrap().into()),
-                ..GraphicsPipelineCreateInfo::new(layout.clone())
+                ..GraphicsPipelineCreateInfo::new(&layout)
             },
         )?;
         // Vertices for a cube
@@ -828,7 +811,7 @@ impl App {
                 allocate_preference: MemoryAllocatePreference::Unknown,
                 ..Default::default()
             },
-            VERTICES.into_iter(),
+            VERTICES,
         )?;
         let indices = Buffer::from_iter::<u32, _>(
             &allocator,
@@ -842,7 +825,7 @@ impl App {
                 allocate_preference: MemoryAllocatePreference::Unknown,
                 ..Default::default()
             },
-            INDICES.into_iter(),
+            INDICES,
         )?;
         let cmdbuf_allocator = Arc::new(StandardCommandBufferAllocator::new(
             &device,
@@ -879,21 +862,27 @@ impl App {
                 .collect()
         };
         let descriptor_set = DescriptorSet::new(
-            descriptor_set_allocator.clone(),
-            pipeline.layout().set_layouts().first().unwrap().clone(),
-            [WriteDescriptorSet::buffer(0, mvp.clone())],
-            [],
+            &descriptor_set_allocator,
+            pipeline.layout().set_layouts().first().unwrap(),
+            &[WriteDescriptorSet::buffer(
+                0,
+                &DescriptorBufferInfo {
+                    buffer: Some(mvp.buffer()),
+                    ..Default::default()
+                },
+            )],
+            &[],
         )?;
         let cmdbufs = swapchain_images
             .iter()
-            .zip(depth_images.into_iter())
+            .zip(depth_images)
             .map(|(i, di)| {
                 let framebuffer = Framebuffer::new(
-                    render_pass.clone(),
-                    FramebufferCreateInfo {
-                        attachments: vec![
-                            ImageView::new(i, &ImageViewCreateInfo::from_image(i))?,
-                            di,
+                    &render_pass,
+                    &FramebufferCreateInfo {
+                        attachments: &[
+                            &ImageView::new(i, &ImageViewCreateInfo::from_image(i))?,
+                            &di,
                         ],
                         ..Default::default()
                     },
